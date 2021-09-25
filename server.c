@@ -9,12 +9,15 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <time.h>
-#include <signal.h>
+#include <stdbool.h>
+#include "db.h"
+
 #define MAX 512
 #define PORT 8080
 #define MAX_CONN 128
 #define SA struct sockaddr
 pthread_mutex_t lock;
+pthread_mutex_t db_lock;
 
 int connections[128];
 int num_connections = 0;
@@ -23,14 +26,16 @@ typedef struct thread_ctx
 {
 	int fd;
 	int idx;
+	char *username;
 	char *address;
 }
 thread_ctx;
 
-void handler(int num)
+bool starts_with(const char *a, const char *b)
 {
-	return;
-};
+	if(strncmp(a, b, strlen(b)) == 0) return 1;
+	return 0;
+}
 
 void *handle_client(void *void_ptr)
 {
@@ -38,6 +43,7 @@ void *handle_client(void *void_ptr)
 	int sockfd = th_ctx.fd;
 	int idx = th_ctx.idx;
 	char *ip_address = th_ctx.address;
+	char *username = th_ctx.username;
 
 	pthread_mutex_lock(&lock);
 	connections[num_connections] = sockfd;
@@ -45,14 +51,15 @@ void *handle_client(void *void_ptr)
 	pthread_mutex_unlock(&lock);
 
 	char buff[MAX];
+	bool logged_in = false;
 
 	for (;;)
 	{
 		bzero(buff, MAX);
 		int n_read = read(sockfd, buff, sizeof(buff) - 1);
 
-		if (n_read <= 0)
-		{
+		if (n_read <= 0){
+			free(void_ptr);
 			pthread_mutex_lock(&lock);
 			close(sockfd);
 			connections[idx] = -1;
@@ -60,35 +67,98 @@ void *handle_client(void *void_ptr)
 			break;
 		}
 
-		pthread_mutex_lock(&lock);
+		if(!logged_in){	
+			if(starts_with(buff, "/login")){
+				strtok(buff, " ");
+				char* user = strtok(NULL, " ");
+				char* pass = strtok(NULL, " ");
+				//remove new line at end of string
+				pass[strlen(pass) - 1] = 0;
 
-		for (int i = 0; i < num_connections; i++)
-		{
-			if (connections[i] == -1)
-			{
+				pthread_mutex_lock(&db_lock);
+
+				if(check_if_user_exists(user, pass)){
+					pthread_mutex_unlock(&db_lock);
+				
+					logged_in = true;
+					char* msg = "Logged in succesfully!";
+					
+					pthread_mutex_lock(&lock);
+
+					th_ctx.username = malloc(strlen(user) + 1);
+					// bzero(th_ctx.username, strlen(user) + 1);
+					strcpy(th_ctx.username, user);
+
+					// strcpy(th_ctx.username, user);
+										
+					pthread_mutex_unlock(&lock);
+
+					write(sockfd, msg, strlen(msg));
+				}else{
+					char* msg = "No such user found!";
+					write(sockfd, msg, strlen(msg));
+				}
+			}else if(starts_with(buff, "/register")){
+				strtok(buff, " ");
+				char* user = strtok(NULL, " ");
+				char* pass = strtok(NULL, " ");
+				//remove new line at end of string
+				pass[strlen(pass) - 1] = 0;
+
+				pthread_mutex_lock(&db_lock);
+				
+				if(check_if_user_exists(user, pass)){
+					pthread_mutex_unlock(&db_lock);
+				
+					char* msg = "User already exists!";
+					write(sockfd, msg, strlen(msg));
+				}else{
+					logged_in = true;
+					char* msg = "Registered and Logged in succesfully!";
+					
+					pthread_mutex_lock(&lock);
+
+					th_ctx.username = malloc(strlen(user) + 1);
+					strcpy(user, username);
+
+					pthread_mutex_unlock(&lock);
+
+					write(sockfd, msg, strlen(msg));
+					pthread_mutex_lock(&db_lock);
+					save_user_info(user, pass);
+					pthread_mutex_unlock(&db_lock);
+				}
+			}else{
 				continue;
 			}
-			write(connections[i], ip_address, strlen(ip_address));
+		}else{
+			pthread_mutex_lock(&lock);
 
-			time_t t = time(NULL);
-			struct tm *tm = localtime(&t);
-			char s[64];
+			for (int i = 0; i < num_connections; i++){
+				if (connections[i] == -1){
+					continue;
+				}
+				write(connections[i], th_ctx.username, strlen(th_ctx.username));
 
-			strftime(s, sizeof(s), "%c", tm);
-			write(connections[i], " ", 1);
-			write(connections[i], s, sizeof(s));
-			write(connections[i], ":", 1);
+				time_t t = time(NULL);
+				struct tm *tm = localtime(&t);
+				char s[64];
 
-			write(connections[i], buff, strlen(buff));
+				strftime(s, sizeof(s), "%c", tm);
+				write(connections[i], " ", 1);
+				write(connections[i], s, sizeof(s));
+				write(connections[i], ":", 1);
+
+				write(connections[i], buff, strlen(buff));
+			}
+			pthread_mutex_unlock(&lock);
 		}
-		pthread_mutex_unlock(&lock);
 	}
 }
 
 // Driver function
 int main()
 {
-	signal(SIGPIPE, handler);
 
 	int sockfd, connfd, len;
 	struct sockaddr_in servaddr, cli;
@@ -155,10 +225,9 @@ int main()
 			inet_ntop(AF_INET, &ipAddr, str, INET_ADDRSTRLEN);
 
 			thread_ctx *th_ctx = malloc(sizeof(thread_ctx));
-			int *sockfd = malloc(sizeof(int));
-			th_ctx->fd = sockfd;
+			th_ctx->fd = connfd;
 			th_ctx->address = str;
-			th_ctx->idx = *(int*) malloc(sizeof(int));
+			th_ctx->idx = num_connections;
 			pthread_create(&th[num_connections], NULL, &handle_client, th_ctx);
 		}
 	}
