@@ -12,14 +12,15 @@
 #include <stdbool.h>
 #include "db.h"
 
-#define MAX 512
+#define MAX_MSG_LEN 512
 #define PORT 8080
-#define MAX_CONN 128
+#define MAX_CONNECTIONS 512
 #define SA struct sockaddr
 pthread_mutex_t lock;
 pthread_mutex_t db_lock;
 
-int connections[128];
+int connections[MAX_CONNECTIONS];
+char* usernames[MAX_CONNECTIONS];
 int num_connections = 0;
 
 typedef struct thread_ctx
@@ -50,12 +51,12 @@ void *handle_client(void *void_ptr)
 	num_connections++;
 	pthread_mutex_unlock(&lock);
 
-	char buff[MAX];
+	char buff[MAX_MSG_LEN];
 	bool logged_in = false;
 
 	for (;;)
 	{
-		bzero(buff, MAX);
+		bzero(buff, MAX_MSG_LEN);
 		int n_read = read(sockfd, buff, sizeof(buff) - 1);
 
 		if (n_read <= 0){
@@ -81,21 +82,20 @@ void *handle_client(void *void_ptr)
 					pthread_mutex_unlock(&db_lock);
 				
 					logged_in = true;
-					char* msg = "Logged in succesfully!";
+					char* msg = "Logged in succesfully!\n";
 					
 					pthread_mutex_lock(&lock);
 
 					th_ctx.username = malloc(strlen(user) + 1);
-					// bzero(th_ctx.username, strlen(user) + 1);
-					strcpy(th_ctx.username, user);
+					strcpy(th_ctx.username, user);					
+					usernames[idx] = th_ctx.username;
 
-					// strcpy(th_ctx.username, user);
-										
 					pthread_mutex_unlock(&lock);
 
 					write(sockfd, msg, strlen(msg));
 				}else{
-					char* msg = "No such user found!";
+					pthread_mutex_unlock(&db_lock);
+					char* msg = "No such user found!\n";
 					write(sockfd, msg, strlen(msg));
 				}
 			}else if(starts_with(buff, "/register")){
@@ -110,17 +110,18 @@ void *handle_client(void *void_ptr)
 				if(check_if_user_exists(user, pass)){
 					pthread_mutex_unlock(&db_lock);
 				
-					char* msg = "User already exists!";
+					char* msg = "User already exists!\n";
 					write(sockfd, msg, strlen(msg));
 				}else{
+					pthread_mutex_unlock(&db_lock);
 					logged_in = true;
-					char* msg = "Registered and Logged in succesfully!";
-					
+					char* msg = "Registered and Logged in succesfully!\n";
+
 					pthread_mutex_lock(&lock);
 
 					th_ctx.username = malloc(strlen(user) + 1);
-					strcpy(user, username);
-
+					strcpy(th_ctx.username, user);
+					usernames[idx] = th_ctx.username;
 					pthread_mutex_unlock(&lock);
 
 					write(sockfd, msg, strlen(msg));
@@ -131,32 +132,53 @@ void *handle_client(void *void_ptr)
 			}else{
 				continue;
 			}
-		}else{
+		}else if(starts_with(buff, "/sendmsg") || starts_with(buff, "/sendmsgto")){
 			pthread_mutex_lock(&lock);
+			char* recipient = NULL;
+			bool is_private_msg = false;
+			
+			char *msg = NULL;
+			strtok(buff, "\"");
+			msg = strtok(NULL, "\"");
+			
+			if(starts_with(buff, "/sendmsgto")){
+					strtok(buff, " ");
+					recipient = strtok(NULL, " ");
+					is_private_msg = true;
+			}
+			//debug
+			printf("Message is %s", msg);
 
 			for (int i = 0; i < num_connections; i++){
 				if (connections[i] == -1){
 					continue;
 				}
-				write(connections[i], th_ctx.username, strlen(th_ctx.username));
+				if(!is_private_msg || (is_private_msg && strcmp(usernames[i], recipient) == 0)){
+					time_t t = time(NULL);
+					struct tm *tm = localtime(&t);
+					char s[64];
+					strftime(s, sizeof(s), "%c", tm);
+					
+					const int FULL_MSG_LEN = 1000;
+					char *full_msg = (char*)malloc(FULL_MSG_LEN);
+					bzero(full_msg, FULL_MSG_LEN);
+					if(!is_private_msg){
+						sprintf(full_msg, "%s %s :%s\n", th_ctx.username, s, msg);
+					}else{
+						sprintf(full_msg, "(Private message)%s %s:%s\n", th_ctx.username, s, msg);
+					}
+					//for debug
+					printf("%s\n", full_msg);
 
-				time_t t = time(NULL);
-				struct tm *tm = localtime(&t);
-				char s[64];
+					write(connections[i], full_msg, strlen(full_msg));					
+				}
 
-				strftime(s, sizeof(s), "%c", tm);
-				write(connections[i], " ", 1);
-				write(connections[i], s, sizeof(s));
-				write(connections[i], ":", 1);
-
-				write(connections[i], buff, strlen(buff));
 			}
 			pthread_mutex_unlock(&lock);
 		}
 	}
 }
-
-// Driver function
+	
 int main()
 {
 
@@ -198,7 +220,6 @@ int main()
 		printf("Server listening..\n");
 	len = sizeof(cli);
 
-	pthread_t th[128];
 	int num_connections = 0;
 
 	if (pthread_mutex_init(&lock, NULL) != 0)
@@ -206,6 +227,14 @@ int main()
 		printf("\n mutex init failed\n");
 		return 1;
 	}
+
+	if (pthread_mutex_init(&db_lock, NULL) != 0)
+	{
+		printf("\n mutex init failed\n");
+		return 1;
+	}
+
+	pthread_t th[MAX_CONNECTIONS];
 
 	for (;;)
 	{
