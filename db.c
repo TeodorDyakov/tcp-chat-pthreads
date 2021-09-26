@@ -14,7 +14,7 @@ pthread_mutex_t db_lock;
 
 int initialize_db() {
     //create the db file if not exists
-    FILE * fp = fopen(DB_file, "a");
+    FILE * fp = fopen(DB_file, "w");
     if (fp == NULL)
         exit(EXIT_FAILURE);
     fclose(fp);
